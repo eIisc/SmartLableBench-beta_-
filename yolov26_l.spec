@@ -2,7 +2,7 @@
 import os
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('yoloe-26x-seg.pt', '.'), ('yoloe-26l-seg.pt', '.'), ('prompts_4000_template.txt', '.')]
+datas = [('yoloe-26x-seg.pt', '.'), ('yoloe-26l-seg.pt', '.')]
 binaries = []
 hiddenimports = []
 

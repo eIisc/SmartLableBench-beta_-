@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+
+# Build outputs
+build/
+build_*/
+dist/
+dist_*/
+*.spec.bak
+
+# PyInstaller and logs
+*.log
+pyinstaller_*.log
+pyi_*.log
+release_build.log
+
+# IDE
+.vscode/
+.idea/
+
+# Runtime/data artifacts
+dataset_annotations/
+train_dataset/
+raw/
+ITEST/
+
+# Keep repository memory
+!/memories/
+
+# Large model weights
+*.pt
+*.onnx
+*.engine
+
+# Oversized local model/resource snapshots
+mobileclip2_b.ts
+version_20260401/

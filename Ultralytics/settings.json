@@ -1,0 +1,21 @@
+{
+  "settings_version": "0.0.6",
+  "datasets_dir": "D:\\Python_File\\yolov26_l\\datasets",
+  "weights_dir": "weights",
+  "runs_dir": "runs",
+  "uuid": "ae9f611f354380e424aaee7bbc50a5cfe37e91392351d2cebd9b0392e36d04e3",
+  "sync": true,
+  "api_key": "",
+  "openai_api_key": "",
+  "clearml": true,
+  "comet": true,
+  "dvc": true,
+  "hub": true,
+  "mlflow": true,
+  "neptune": true,
+  "raytune": true,
+  "tensorboard": false,
+  "wandb": false,
+  "vscode_msg": true,
+  "openvino_msg": true
+}

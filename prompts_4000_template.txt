@@ -1,0 +1,13 @@
+# 每行一个提示词，支持英文短语
+# 以 # 开头的行为注释
+# 示例（请替换为你的 4000+ 词表）
+person
+car
+truck
+bus
+motorcycle
+bicycle
+traffic light
+stop sign
+cell phone
+laptop

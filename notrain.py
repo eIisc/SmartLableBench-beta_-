@@ -127,6 +127,7 @@ def main(argv=None):
     parser.add_argument("--domain-hint", default="", help="领域提示")
     parser.add_argument("--component-combine", action="store_true", help="将识别类别统一显示为固定词")
     parser.add_argument("--component-name", default="", help="成分组合固定类别名")
+    parser.add_argument("--target-mode", choices=["single", "multi"], default="single", help="目标模式")
     parser.add_argument("--preview-file", default=None, help="将实时预览帧写入该文件路径（供GUI内嵌显示）")
     parser.add_argument("--preview-write-interval-ms", type=int, default=80, help="预览文件写入间隔毫秒")
     parser.add_argument("--stats-interval", type=int, default=3, help="进度统计输出间隔帧数")
@@ -204,12 +205,15 @@ def main(argv=None):
         print(f"负提示词: {', '.join(negative_prompts[:12])}")
 
     combine_name = str(args.component_name or "").strip()
-    use_component_combine = bool(args.component_combine and combine_name)
-    if args.component_combine and not combine_name:
-        print("你启用了成分组合，但未提供固定类别名，已自动回退为普通显示")
+    target_mode = str(args.target_mode or "single").strip().lower()
+    if target_mode == "single" and not combine_name:
+        print("单目标模式下未提供组合名称(--component-name)，已自动回退为多目标显示")
+    use_component_combine = bool(target_mode == "single" and combine_name)
 
     if use_component_combine:
         print(f"成分组合已启用，统一类别名: {combine_name}")
+    else:
+        print("多目标模式: 按识别类别原样显示")
 
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():

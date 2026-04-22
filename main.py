@@ -1,5 +1,6 @@
 import argparse
 import sys
+from pathlib import Path
 
 
 def run_annotate(rest_args):
@@ -33,6 +34,17 @@ def run_train(rest_args):
 
 
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    else:
+        argv = list(argv)
+
+    # Be tolerant to legacy forwarding patterns from older launchers.
+    while argv and argv[0] in ("-u", "-m"):
+        argv.pop(0)
+    if argv and Path(argv[0]).name.lower() in {"main.py", "__main__.py"}:
+        argv.pop(0)
+
     parser = argparse.ArgumentParser(description="YOLO 标注工具统一入口")
     parser.add_argument(
         "command",

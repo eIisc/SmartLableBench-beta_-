@@ -929,6 +929,133 @@ def build_detection_prompt_subset(expanded_prompts, seed_prompts, max_terms=48):
     return selected[:max_terms] if selected else seeds
 
 
+def prune_overlapping_prompts_for_multi(seed_prompts, expanded_prompts, max_terms=300):
+    """多目标模式下，过滤重叠/近重复提示词，避免目标语义互相覆盖。"""
+    seeds = dedupe_keep_order(seed_prompts)
+    expanded = dedupe_keep_order(expanded_prompts)
+
+    kept = []
+    kept_norm = []
+
+    color_alias = {
+        "red": "red",
+        "green": "green",
+        "blue": "blue",
+        "black": "black",
+        "white": "white",
+        "silver": "silver",
+        "gray": "gray",
+        "grey": "gray",
+        "yellow": "yellow",
+        "orange": "orange",
+        "purple": "purple",
+        "pink": "pink",
+        "brown": "brown",
+        "gold": "gold",
+        "golden": "gold",
+        "铜": "copper",
+        "copper": "copper",
+        "红": "red",
+        "绿色": "green",
+        "绿": "green",
+        "蓝": "blue",
+        "黑": "black",
+        "白": "white",
+        "银": "silver",
+        "灰": "gray",
+        "黄": "yellow",
+        "橙": "orange",
+        "紫": "purple",
+        "粉": "pink",
+        "棕": "brown",
+        "金": "gold",
+    }
+    non_anchor_tokens = {
+        "with", "on", "in", "at", "of", "for", "to", "from", "by", "and", "or",
+        "covered", "obscured", "mirrored", "blueprint", "texture", "wide", "angle", "view", "shape", "struct",
+        "painted", "tiled", "roof",
+        "with", "on", "覆盖", "遮挡", "镜像", "纹理", "结构", "视角", "屋顶", "涂层", "彩绘", "瓷砖",
+    }
+
+    def colors_of(text):
+        out = set()
+        for tk in tokenize_for_match(text):
+            c = color_alias.get(normalize_text(tk))
+            if c:
+                out.add(c)
+        return out
+
+    def anchor_tokens_of(text):
+        tks = [normalize_text(x) for x in tokenize_for_match(text)]
+        out = []
+        for tk in tks:
+            if len(tk) < 3:
+                continue
+            if tk in non_anchor_tokens:
+                continue
+            if tk in color_alias:
+                continue
+            out.append(tk)
+        return out
+
+    # 基于种子词建立“锚点 -> 允许颜色”约束，防止多目标扩词出现颜色互斥重叠。
+    anchor_allowed_colors = {}
+    for s in seeds:
+        s_colors = colors_of(s)
+        if not s_colors:
+            continue
+        for a in anchor_tokens_of(s):
+            anchor_allowed_colors.setdefault(a, set()).update(s_colors)
+
+    def canon(text):
+        t = normalize_text(text)
+        if t.endswith("s") and len(t) > 4:
+            t = t[:-1]
+        return t
+
+    def overlapped(n):
+        for ex in kept_norm:
+            if n == ex:
+                return True
+            # 避免 broad/narrow 互相重叠，例如 laptop 与 gaming laptop。
+            if len(n) >= 5 and len(ex) >= 5 and (n in ex or ex in n):
+                return True
+        return False
+
+    def violates_color_constraint(term):
+        t_colors = colors_of(term)
+        if not t_colors:
+            return False
+        for a in anchor_tokens_of(term):
+            allow = anchor_allowed_colors.get(a)
+            if not allow:
+                continue
+            # 该锚点存在颜色白名单时，发现完全不在白名单内的颜色则丢弃。
+            if t_colors.isdisjoint(allow):
+                return True
+        return False
+
+    for term in seeds:
+        n = canon(term)
+        if not n or overlapped(n):
+            continue
+        kept.append(term)
+        kept_norm.append(n)
+
+    for term in expanded:
+        n = canon(term)
+        if not n or overlapped(n):
+            continue
+        if violates_color_constraint(term):
+            continue
+        kept.append(term)
+        kept_norm.append(n)
+        if len(kept) >= max(1, int(max_terms)):
+            break
+
+    return kept
+
+
 def build_prompt_groups_for_display(seed_prompts, expanded_prompts, max_each=24):
     seeds = dedupe_keep_order(seed_prompts)
     expanded = dedupe_keep_order(expanded_prompts)
@@ -1969,12 +2096,22 @@ def _sanitize_seg_polygon_xyn(poly_xyn, anchor_xywhn, image_shape, gate_expand=1
     return out
 
 
-def write_label_files(stem, det_lines, seg_lines, labels_det, labels_seg):
-    with open(labels_det / f"{stem}.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(det_lines) + ("\n" if det_lines else ""))
+def write_label_files(stem, det_lines, seg_lines, labels_det, labels_seg, label_output_mode="both"):
+    mode = str(label_output_mode or "both").strip().lower()
+    det_file = labels_det / f"{stem}.txt"
+    seg_file = labels_seg / f"{stem}.txt"
 
-    with open(labels_seg / f"{stem}.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(seg_lines) + ("\n" if seg_lines else ""))
+    if mode in {"both", "det"}:
+        with open(det_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(det_lines) + ("\n" if det_lines else ""))
+    elif det_file.exists():
+        det_file.unlink()
+
+    if mode in {"both", "seg"}:
+        with open(seg_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(seg_lines) + ("\n" if seg_lines else ""))
+    elif seg_file.exists():
+        seg_file.unlink()
 
 
 def remove_label_files_if_exists(stem, labels_det, labels_seg):
@@ -2019,6 +2156,7 @@ def process_one_image(
     secondary_conf=0.30,
     secondary_iou=0.55,
     force_single_class=False,
+    label_output_mode="both",
     image_index=None,
     image_total=None,
 ):
@@ -2311,7 +2449,14 @@ def process_one_image(
 
     print(f"STEP: {step_prefix}{Path(image_path).name} - 写入标注")
     if det_lines or seg_lines:
-        write_label_files(image_path.stem, det_lines, seg_lines, labels_det, labels_seg)
+        write_label_files(
+            image_path.stem,
+            det_lines,
+            seg_lines,
+            labels_det,
+            labels_seg,
+            label_output_mode=label_output_mode,
+        )
     else:
         remove_label_files_if_exists(image_path.stem, labels_det, labels_seg)
         return {
@@ -2386,6 +2531,8 @@ def main(argv=None):
     parser.add_argument("--negative-prompt-text", default="", help="负提示词，逗号/空格分隔")
     parser.add_argument("--component-combine", action="store_true", help="将输出标签类别统一为固定词")
     parser.add_argument("--component-name", default="", help="成分组合固定类别名")
+    parser.add_argument("--target-mode", choices=["auto", "single", "multi"], default="auto", help="目标模式")
+    parser.add_argument("--label-output-mode", choices=["both", "det", "seg"], default="both", help="输出标签类型")
     parser.add_argument("--open-vocab", choices=["auto", "on", "off"], default="auto", help="开放词表模式: auto自动/on强制/off关闭")
     parser.add_argument("--enable-llm-expand", action="store_true", help="启用 LLM 提示词扩展")
     parser.add_argument("--force-llm-expand", action="store_true", help="强制启用LLM扩词，失败即退出")
@@ -2427,8 +2574,12 @@ def main(argv=None):
     if args.force_llm_expand:
         args.enable_llm_expand = True
 
-    if args.component_combine and (not str(args.component_name).strip()):
-        print("你启用了 --component-combine，但未提供 --component-name")
+    target_mode = args.target_mode
+    if target_mode == "auto":
+        target_mode = "single" if args.component_combine else "multi"
+
+    if target_mode == "single" and (not str(args.component_name).strip()):
+        print("单目标模式需要提供 --component-name")
         return
 
     if not os.path.exists(args.model):
@@ -2477,6 +2628,14 @@ def main(argv=None):
         )
         print(f"提示词扩展模式: {expand_info['mode']}")
         print(f"原始提示词: {len(original_prompts)} | 扩展后: {len(prompts)}")
+        if target_mode == "multi":
+            before_cnt = len(prompts)
+            prompts = prune_overlapping_prompts_for_multi(
+                seed_prompts=original_prompts or prompts,
+                expanded_prompts=prompts,
+                max_terms=args.llm_max_terms,
+            )
+            print(f"多目标防重叠过滤: {before_cnt} -> {len(prompts)}")
         if args.enable_llm_expand:
             print("LLM_EXPANDED_PROMPTS_BEGIN")
             for p in prompts:
@@ -2628,7 +2787,7 @@ def main(argv=None):
             f"drop_large_area={args.hard_large_area_ratio}"
         )
 
-    force_single_class = bool(args.component_combine and str(args.component_name).strip())
+    force_single_class = bool(target_mode == "single")
 
     if class_id_mode == "index":
         class_name_to_id, output_classes = build_open_vocab_class_id_map(
@@ -2688,6 +2847,7 @@ def main(argv=None):
             secondary_conf=args.second_check_conf,
             secondary_iou=args.second_check_iou,
             force_single_class=force_single_class,
+            label_output_mode=args.label_output_mode,
             image_index=i,
             image_total=len(images),
         )
@@ -2734,6 +2894,8 @@ def main(argv=None):
         "prompt_expand_error": expand_info.get("error"),
         "active_classes_count": len(output_classes),
         "mode_used": mode_used,
+        "target_mode": target_mode,
+        "label_output_mode": args.label_output_mode,
         "prompts_file": args.prompts_file,
         "negative_prompts_file": args.negative_prompts_file,
         "negative_prompt_count": len(negative_prompts),

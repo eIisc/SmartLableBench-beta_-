@@ -110,6 +110,24 @@ class AnnotationWorker(QThread):
     def resume_after_pause(self):
         self._runtime_paused = False
 
+    def pause_now(self):
+        if self._runtime_paused:
+            return True
+        ok = self._suspend_current_process()
+        if ok:
+            self._runtime_paused = True
+            self.paused.emit("任务已暂停")
+        return ok
+
+    def resume_now(self):
+        if not self._runtime_paused:
+            return True
+        ok = self._resume_current_process()
+        if ok:
+            self._runtime_paused = False
+            self.resumed.emit("继续运行")
+        return ok
+
     def _suspend_current_process(self):
         if psutil is None or self._current_process is None:
             return False
@@ -403,7 +421,13 @@ class MainWindow(QMainWindow):
             "label_timeout": "超时(秒)",
             "label_domain": "领域提示",
             "scene_hint": "建议写法: 目标+背景+角度+排除项。自然语言措辞会直接影响结果。",
-            "composition_enable": "成分组合",
+            "target_mode": "目标模式",
+            "target_mode_single": "单目标",
+            "target_mode_multi": "多目标",
+            "label_output_mode": "标签输出",
+            "label_output_det": "仅检测",
+            "label_output_seg": "仅分割",
+            "label_output_both": "检测+分割",
             "force_cpu": "仅CPU",
             "train_title": "快速训练",
             "train_subtitle": "简化流程：填路径 -> 设轮次 -> 一键启动",
@@ -418,6 +442,7 @@ class MainWindow(QMainWindow):
             "label_deploy_negative": "负提示词",
             "label_deploy_target": "目标描述",
             "label_deploy_component": "组合名称",
+            "label_deploy_target_mode": "目标模式",
             "label_chart_granularity": "综合粒度",
             "label_llm_result": "LLM扩词结果",
             "enable_box_expand": "启用框扩张",
@@ -431,6 +456,9 @@ class MainWindow(QMainWindow):
             "tooltip_pixel_refine": "严格框修正，优先保证目标完整且避免越界到其他物体",
             "tooltip_hard_small": "适合目标占比小且背景干扰大的场景：抑制大面积框并提高精度",
             "train_export_onnx": "训练后导出ONNX",
+            "train_pause": "暂停训练",
+            "train_resume": "继续训练",
+            "train_terminate": "终止训练",
             "train_format_yolo": "YOLO + YAML（可直接训练）",
             "train_format_voc": "Pascal VOC XML（仅导出）",
             "train_format_label": "数据集生成格式",
@@ -445,6 +473,8 @@ class MainWindow(QMainWindow):
             "train_epoch": "Epoch",
             "train_batch": "Batch",
             "train_val": "Val",
+            "train_max_ram": "最大RAM(%)",
+            "train_max_vram": "最大VRAM(%)",
             "stats_auto_reset": "完成后清零统计",
             "stats_reset": "清零统计",
         }
@@ -502,7 +532,13 @@ class MainWindow(QMainWindow):
             "label_timeout": "Timeout (s)",
             "label_domain": "Domain Hint",
             "scene_hint": "Suggested: target + background + angle + exclusions. Wording directly affects results.",
-            "composition_enable": "Component Combine",
+            "target_mode": "Target Mode",
+            "target_mode_single": "Single Target",
+            "target_mode_multi": "Multi Target",
+            "label_output_mode": "Label Output",
+            "label_output_det": "Det Only",
+            "label_output_seg": "Seg Only",
+            "label_output_both": "Det + Seg",
             "force_cpu": "CPU Only",
             "train_title": "Quick Training",
             "train_subtitle": "Simplified flow: set paths -> set epochs -> one-click start",
@@ -517,6 +553,7 @@ class MainWindow(QMainWindow):
             "label_deploy_negative": "Negative Prompt",
             "label_deploy_target": "Target Description",
             "label_deploy_component": "Combined Name",
+            "label_deploy_target_mode": "Target Mode",
             "label_chart_granularity": "Granularity",
             "label_llm_result": "LLM Expanded Prompts",
             "enable_box_expand": "Enable Box Expansion",
@@ -530,6 +567,9 @@ class MainWindow(QMainWindow):
             "tooltip_pixel_refine": "Apply strict box refinement to keep target complete and avoid crossing to other objects.",
             "tooltip_hard_small": "For tiny targets with noisy backgrounds: suppress large-area boxes and improve precision.",
             "train_export_onnx": "Export ONNX After Training",
+            "train_pause": "Pause Training",
+            "train_resume": "Resume Training",
+            "train_terminate": "Terminate Training",
             "train_format_yolo": "YOLO + YAML (Trainable)",
             "train_format_voc": "Pascal VOC XML (Export Only)",
             "train_format_label": "Dataset Format",
@@ -544,6 +584,8 @@ class MainWindow(QMainWindow):
             "train_epoch": "Epoch",
             "train_batch": "Batch",
             "train_val": "Val",
+            "train_max_ram": "Max RAM (%)",
+            "train_max_vram": "Max VRAM (%)",
             "stats_auto_reset": "Reset Stats After Finish",
             "stats_reset": "Reset Stats",
         }
@@ -576,13 +618,35 @@ class MainWindow(QMainWindow):
         self.btn_help.setText(self._tr("btn_help"))
         self.btn_pause_preview.setText(self._tr("btn_pause") if not self._run_pause_requested else self._tr("btn_wait_current"))
         self.btn_train.setText(self._tr("btn_train"))
+        if hasattr(self, "btn_train_pause"):
+            self.btn_train_pause.setText(self._tr("train_resume") if self._run_paused else self._tr("train_pause"))
+        if hasattr(self, "btn_train_stop"):
+            self.btn_train_stop.setText(self._tr("train_terminate"))
         self.btn_deploy_start.setText(self._tr("btn_deploy_start"))
         self.btn_deploy_stop.setText(self._tr("btn_deploy_stop"))
 
         self.preview.setText(self._tr("preview_area"))
         self.deploy_preview.setText(self._tr("deploy_preview_area"))
         self.deploy_state_text.setText(self._tr("deploy_idle"))
-        self.composition_enable.setText(self._tr("composition_enable"))
+        self.lbl_target_mode.setText(self._tr("target_mode"))
+        self.target_mode_combo.blockSignals(True)
+        cur_target_mode = self.target_mode_combo.currentData()
+        self.target_mode_combo.clear()
+        self.target_mode_combo.addItem(self._tr("target_mode_single"), "single")
+        self.target_mode_combo.addItem(self._tr("target_mode_multi"), "multi")
+        idx = 0 if cur_target_mode != "multi" else 1
+        self.target_mode_combo.setCurrentIndex(idx)
+        self.target_mode_combo.blockSignals(False)
+        self.lbl_label_output_mode.setText(self._tr("label_output_mode"))
+        self.label_output_mode_combo.blockSignals(True)
+        cur_label_mode = self.label_output_mode_combo.currentData()
+        self.label_output_mode_combo.clear()
+        self.label_output_mode_combo.addItem(self._tr("label_output_both"), "both")
+        self.label_output_mode_combo.addItem(self._tr("label_output_det"), "det")
+        self.label_output_mode_combo.addItem(self._tr("label_output_seg"), "seg")
+        mode_idx = {"both": 0, "det": 1, "seg": 2}.get(cur_label_mode, 0)
+        self.label_output_mode_combo.setCurrentIndex(mode_idx)
+        self.label_output_mode_combo.blockSignals(False)
         self.force_cpu.setText(self._tr("force_cpu"))
         self.enable_box_expand.setText(self._tr("enable_box_expand"))
         self.enable_second_check.setText(self._tr("enable_second_check"))
@@ -630,6 +694,10 @@ class MainWindow(QMainWindow):
         self.lbl_train_epoch.setText(self._tr("train_epoch"))
         self.lbl_train_batch.setText(self._tr("train_batch"))
         self.lbl_train_val.setText(self._tr("train_val"))
+        if hasattr(self, "lbl_train_max_ram"):
+            self.lbl_train_max_ram.setText(self._tr("train_max_ram"))
+        if hasattr(self, "lbl_train_max_vram"):
+            self.lbl_train_max_vram.setText(self._tr("train_max_vram"))
         self.train_export_onnx.setText(self._tr("train_export_onnx"))
         cur_fmt_idx = self.train_dataset_format.currentIndex()
         self.train_dataset_format.blockSignals(True)
@@ -647,9 +715,19 @@ class MainWindow(QMainWindow):
         self.lbl_deploy_negative.setText(self._tr("label_deploy_negative"))
         self.lbl_deploy_target.setText(self._tr("label_deploy_target"))
         self.lbl_deploy_component.setText(self._tr("label_deploy_component"))
+        self.lbl_deploy_target_mode.setText(self._tr("label_deploy_target_mode"))
+        self.deploy_target_mode_combo.blockSignals(True)
+        cur_deploy_mode = self.deploy_target_mode_combo.currentData()
+        self.deploy_target_mode_combo.clear()
+        self.deploy_target_mode_combo.addItem(self._tr("target_mode_single"), "single")
+        self.deploy_target_mode_combo.addItem(self._tr("target_mode_multi"), "multi")
+        self.deploy_target_mode_combo.setCurrentIndex(0 if cur_deploy_mode != "multi" else 1)
+        self.deploy_target_mode_combo.blockSignals(False)
+        self._on_deploy_target_mode_changed(self.deploy_target_mode_combo.currentIndex())
         self.lbl_chart_granularity_runtime.setText(self._tr("label_chart_granularity"))
         self.lbl_chart_granularity_deploy.setText(self._tr("label_chart_granularity"))
         self.lbl_llm_result_title.setText(self._tr("label_llm_result"))
+        self._update_train_memory_info()
         self.auto_reset_stats.setText(self._tr("stats_auto_reset"))
         self.btn_reset_stats.setText(self._tr("stats_reset"))
 
@@ -932,8 +1010,17 @@ class MainWindow(QMainWindow):
         self.output_edit = QLineEdit("dataset_annotations")
         self.prompt_text_edit = QLineEdit()
         self.prompt_text_edit.setPlaceholderText("例如: 青苹果")
-        self.composition_enable = QCheckBox("成分组合")
-        self.composition_enable.setChecked(True)
+        self.lbl_target_mode = QLabel("目标模式")
+        self.target_mode_combo = NoWheelComboBox()
+        self.target_mode_combo.addItem("单目标", "single")
+        self.target_mode_combo.addItem("多目标", "multi")
+        self.target_mode_combo.setCurrentIndex(0)
+        self.lbl_label_output_mode = QLabel("标签输出")
+        self.label_output_mode_combo = NoWheelComboBox()
+        self.label_output_mode_combo.addItem("检测+分割", "both")
+        self.label_output_mode_combo.addItem("仅检测", "det")
+        self.label_output_mode_combo.addItem("仅分割", "seg")
+        self.label_output_mode_combo.setCurrentIndex(0)
         self.composition_name_edit = QLineEdit()
         self.composition_name_edit.setPlaceholderText("统一类别名，例如: 苹果")
         self.negative_prompt_text_edit = QLineEdit()
@@ -970,7 +1057,10 @@ class MainWindow(QMainWindow):
         composition_row_l = QHBoxLayout(composition_row)
         composition_row_l.setContentsMargins(0, 0, 0, 0)
         composition_row_l.setSpacing(4)
-        composition_row_l.addWidget(self.composition_enable)
+        composition_row_l.addWidget(self.lbl_target_mode)
+        composition_row_l.addWidget(self.target_mode_combo)
+        composition_row_l.addWidget(self.lbl_label_output_mode)
+        composition_row_l.addWidget(self.label_output_mode_combo)
         composition_help_btn = QToolButton()
         composition_help_btn.setText("?")
         composition_help_btn.setObjectName("hintButton")
@@ -978,10 +1068,10 @@ class MainWindow(QMainWindow):
         composition_help_btn.setAutoRaise(True)
         composition_help_btn.clicked.connect(
             lambda _=False: self.show_feature_help(
-                "成分组合",
+                "单/多目标模式",
                 "成分组合.png",
-                "未启用时：每一个提示词会被分别标注为目标。\n"
-                "启用时：所有提示词标注的目标会被组合，名称是你所输入的同一类别名（程序推荐）。",
+                "单目标: 所有提示词标注统一写入同一类别名，更适合应对高难非典型目标。\n"
+                "多目标: 保留每个提示词对应类别，并在LLM扩词后自动去重避免重叠提示词。",
             )
         )
         composition_row_l.addWidget(composition_help_btn)
@@ -1037,6 +1127,7 @@ class MainWindow(QMainWindow):
         self.force_cpu = QCheckBox("仅CPU")
         self.force_cpu.setToolTip("开启后强制使用CPU推理，并忽略GPU选择")
         self.force_cpu.toggled.connect(self._on_force_cpu_toggled)
+        self.device.currentTextChanged.connect(lambda _t: self._update_train_memory_info())
 
         self.enable_box_expand = QCheckBox("启用框扩张")
         self.enable_box_expand.setChecked(False)
@@ -1177,7 +1268,7 @@ class MainWindow(QMainWindow):
         self.train_images_edit = QLineEdit()
         self.train_dataset_out_edit = QLineEdit("")
         self.train_dataset_out_edit.setPlaceholderText("train_dataset")
-        self.train_model_edit = QLineEdit("yoloe-26x-seg.pt")
+        self.train_model_edit = QLineEdit("raw\\yolo26l.pt")
         self.train_model_combo = NoWheelComboBox()
         self.train_model_combo.setMinimumWidth(260)
         self.train_model_info = QLabel("模型参数: -")
@@ -1194,6 +1285,18 @@ class MainWindow(QMainWindow):
         self.train_val_ratio.setDecimals(2)
         self.train_val_ratio.setSingleStep(0.05)
         self.train_val_ratio.setValue(0.2)
+        self.train_max_ram = NoWheelDoubleSpinBox()
+        self.train_max_ram.setRange(50.0, 98.0)
+        self.train_max_ram.setDecimals(1)
+        self.train_max_ram.setSingleStep(1.0)
+        self.train_max_ram.setValue(88.0)
+        self.train_max_vram = NoWheelDoubleSpinBox()
+        self.train_max_vram.setRange(50.0, 98.0)
+        self.train_max_vram.setDecimals(1)
+        self.train_max_vram.setSingleStep(1.0)
+        self.train_max_vram.setValue(92.0)
+        self.train_memory_info = QLabel("本机内存: RAM - | VRAM -")
+        self.train_memory_info.setObjectName("trainModelInfo")
         self.train_export_onnx = QCheckBox("训练后导出ONNX")
         self.train_export_onnx.setChecked(True)
         self.train_dataset_format = NoWheelComboBox()
@@ -1204,6 +1307,12 @@ class MainWindow(QMainWindow):
         self.train_dataset_format.setCurrentIndex(0)
         self.btn_train = QPushButton("开始训练(二级菜单)")
         self.btn_train.clicked.connect(self.start_train)
+        self.btn_train_pause = QPushButton("暂停训练")
+        self.btn_train_pause.setEnabled(False)
+        self.btn_train_pause.clicked.connect(self.toggle_train_pause)
+        self.btn_train_stop = QPushButton("终止训练")
+        self.btn_train_stop.setEnabled(False)
+        self.btn_train_stop.clicked.connect(self.stop_train_task)
 
         self.btn_pick_ann = QPushButton("标注目录")
         self.btn_pick_img = QPushButton("图片目录")
@@ -1217,6 +1326,8 @@ class MainWindow(QMainWindow):
         self.btn_pick_img.clicked.connect(self.pick_train_images_dir)
         self.btn_pick_dataset_out.clicked.connect(self.pick_train_dataset_out)
         self.btn_pick_train_model.clicked.connect(self.pick_train_model)
+        self.target_mode_combo.currentIndexChanged.connect(self._on_target_mode_changed)
+        self._on_target_mode_changed(self.target_mode_combo.currentIndex())
 
         left_l.addLayout(form)
         left_l.addLayout(model_row)
@@ -1487,6 +1598,13 @@ class MainWindow(QMainWindow):
         compact.addWidget(self.lbl_train_val, 1, 0)
         compact.addWidget(self.train_val_ratio, 1, 1)
         compact.addWidget(self.train_export_onnx, 1, 2, 1, 2)
+        self.lbl_train_max_ram = QLabel("最大RAM(%)")
+        compact.addWidget(self.lbl_train_max_ram, 2, 0)
+        compact.addWidget(self.train_max_ram, 2, 1)
+        self.lbl_train_max_vram = QLabel("最大VRAM(%)")
+        compact.addWidget(self.lbl_train_max_vram, 2, 2)
+        compact.addWidget(self.train_max_vram, 2, 3)
+        compact.addWidget(self.train_memory_info, 3, 0, 1, 4)
 
         self.btn_train.setText("开始训练")
         self.btn_train.setMinimumHeight(42)
@@ -1504,7 +1622,12 @@ class MainWindow(QMainWindow):
         train_controls_l.setSpacing(6)
         train_controls_l.addLayout(top_hud)
         train_controls_l.addLayout(compact)
-        train_controls_l.addWidget(self.btn_train)
+        train_action = QHBoxLayout()
+        train_action.setSpacing(8)
+        train_action.addWidget(self.btn_train, 2)
+        train_action.addWidget(self.btn_train_pause, 1)
+        train_action.addWidget(self.btn_train_stop, 1)
+        train_controls_l.addLayout(train_action)
 
         trend_panel = QWidget()
         trend_panel.setObjectName("trainTrendPanel")
@@ -1576,7 +1699,12 @@ class MainWindow(QMainWindow):
         self.deploy_enable_llm.setChecked(True)
         self.deploy_component_enable = QCheckBox("成分组合")
         self.deploy_component_enable.setChecked(True)
+        self.deploy_component_enable.setEnabled(False)
         self.deploy_component_name = QLineEdit("目标")
+        self.deploy_target_mode_combo = NoWheelComboBox()
+        self.deploy_target_mode_combo.addItem("单目标", "single")
+        self.deploy_target_mode_combo.addItem("多目标", "multi")
+        self.deploy_target_mode_combo.setCurrentIndex(0)
 
         btn_pick_deploy_model = QPushButton("模型文件")
         btn_pick_deploy_model.setObjectName("miniBtn")
@@ -1619,6 +1747,9 @@ class MainWindow(QMainWindow):
         self.lbl_deploy_component = QLabel("组合名称")
         deploy_controls_l.addWidget(self.lbl_deploy_component, 6, 0)
         deploy_controls_l.addWidget(self.deploy_component_name, 6, 1, 1, 3)
+        self.lbl_deploy_target_mode = QLabel("目标模式")
+        deploy_controls_l.addWidget(self.lbl_deploy_target_mode, 7, 0)
+        deploy_controls_l.addWidget(self.deploy_target_mode_combo, 7, 1, 1, 3)
         deploy_controls_l.setColumnStretch(0, 0)
         deploy_controls_l.setColumnStretch(1, 4)
         deploy_controls_l.setColumnStretch(2, 0)
@@ -1702,8 +1833,11 @@ class MainWindow(QMainWindow):
         deploy_page_layout.addWidget(deploy_scroll)
 
         self.train_model_combo.currentTextChanged.connect(self.on_train_model_combo_changed)
+        self.deploy_target_mode_combo.currentIndexChanged.connect(self._on_deploy_target_mode_changed)
+        self._on_deploy_target_mode_changed(self.deploy_target_mode_combo.currentIndex())
         self.btn_refresh_models.clicked.connect(self.refresh_train_models_from_raw)
         self.refresh_train_models_from_raw()
+        self._update_train_memory_info()
         self._apply_language()
 
     def _style(self):
@@ -1984,7 +2118,20 @@ class MainWindow(QMainWindow):
         if items:
             for p in items:
                 self.train_model_combo.addItem(self._to_rel_display_path(p))
-            self.train_model_combo.setCurrentIndex(0)
+            preferred_idx = 0
+            # 默认优先非分割的 26l 模型，其次再回退到 26l-seg。
+            for i, p in enumerate(items):
+                name = p.name.lower()
+                if "26l" in name and not ("-seg" in name or "_seg" in name):
+                    preferred_idx = i
+                    break
+            else:
+                for i, p in enumerate(items):
+                    name = p.name.lower()
+                    if "26l" in name and ("-seg" in name or "_seg" in name):
+                        preferred_idx = i
+                        break
+            self.train_model_combo.setCurrentIndex(preferred_idx)
             self.train_model_edit.setText(self.train_model_combo.currentText())
         else:
             self.train_model_combo.addItem("(raw 目录无可用模型)")
@@ -2056,6 +2203,32 @@ class MainWindow(QMainWindow):
         self.device.setEnabled(not checked)
         if checked:
             self.device.setCurrentText("cpu")
+        self._update_train_memory_info()
+
+    def _update_train_memory_info(self):
+        ram_text = "-"
+        vram_text = "-"
+        try:
+            if psutil is not None:
+                total = float(psutil.virtual_memory().total) / (1024.0 ** 3)
+                ram_text = f"{total:.1f} GB"
+        except Exception:
+            pass
+        try:
+            if torch is not None and torch.cuda.is_available():
+                dev = torch.cuda.current_device()
+                prop = torch.cuda.get_device_properties(dev)
+                total_vram = float(getattr(prop, "total_memory", 0.0) or 0.0) / (1024.0 ** 3)
+                vram_text = f"{total_vram:.1f} GB"
+            else:
+                vram_text = "N/A"
+        except Exception:
+            vram_text = "N/A"
+
+        if getattr(self, "current_language", "zh") == "en":
+            self.train_memory_info.setText(f"System Memory: RAM {ram_text} | VRAM {vram_text}")
+        else:
+            self.train_memory_info.setText(f"本机内存: RAM {ram_text} | VRAM {vram_text}")
 
     def clear_output(self):
         self.log.setPlainText("")
@@ -2534,9 +2707,17 @@ class MainWindow(QMainWindow):
             return ("请至少添加一个模型", [self.model_list])
         if not self.prompt_text_edit.text().strip():
             return ("请填写提示词文本", [self.prompt_text_edit])
-        if self.composition_enable.isChecked() and (not self.composition_name_edit.text().strip()):
-            return ("已启用成分组合，请填写统一类别名", [self.composition_name_edit])
+        if self.target_mode_combo.currentData() == "single" and (not self.composition_name_edit.text().strip()):
+            return ("单目标模式下请填写统一类别名", [self.composition_name_edit])
         return (None, [])
+
+    def _on_target_mode_changed(self, _index):
+        is_single = self.target_mode_combo.currentData() == "single"
+        self.composition_name_edit.setEnabled(is_single)
+        if not is_single:
+            self.composition_name_edit.setPlaceholderText("多目标模式下不需要统一类别名")
+        else:
+            self.composition_name_edit.setPlaceholderText("统一类别名，例如: 苹果")
 
     def _is_online(self):
         try:
@@ -2559,6 +2740,12 @@ class MainWindow(QMainWindow):
             return True
         except Exception:
             return False
+
+    def _build_main_entry_command(self, subcommand):
+        # In packaged mode, call the EXE itself; in source mode, call python main.py.
+        if getattr(sys, "frozen", False):
+            return [sys.executable, subcommand]
+        return [sys.executable, "-u", "main.py", subcommand]
 
     def _precheck_annotate_inputs(self):
         image_dir_text = self.images_edit.text().strip()
@@ -2735,11 +2922,7 @@ class MainWindow(QMainWindow):
                 preview_file.unlink(missing_ok=True)
             except Exception:
                 pass
-            cmd = [
-                sys.executable,
-                "-u",
-                "main.py",
-                "annotate",
+            cmd = self._build_main_entry_command("annotate") + [
                 "--model",
                 self._to_rel_display_path(self._resolve_input_path(model)),
                 "--images",
@@ -2762,9 +2945,12 @@ class MainWindow(QMainWindow):
                 str(preview_file),
             ]
 
-            if self.composition_enable.isChecked() and self.composition_name_edit.text().strip():
+            if self.target_mode_combo.currentData() == "single" and self.composition_name_edit.text().strip():
                 cmd.append("--component-combine")
                 cmd.extend(["--component-name", self.composition_name_edit.text().strip()])
+
+            cmd.extend(["--target-mode", str(self.target_mode_combo.currentData() or "single")])
+            cmd.extend(["--label-output-mode", str(self.label_output_mode_combo.currentData() or "both")])
 
             if self.pixel_refine.isChecked():
                 cmd.append("--pixel-refine")
@@ -2813,6 +2999,7 @@ class MainWindow(QMainWindow):
     def validate_deploy(self):
         model = self.deploy_model_edit.text().strip()
         prompt = self.deploy_prompt_edit.text().strip()
+        deploy_mode = str(self.deploy_target_mode_combo.currentData() or "single")
         if not model:
             return ("请填写部署模型路径", [self.deploy_model_edit])
         model_path = self._resolve_input_path(model)
@@ -2820,23 +3007,28 @@ class MainWindow(QMainWindow):
             return ("部署模型不存在，请重新选择", [self.deploy_model_edit])
         if not prompt:
             return ("请填写组合提示词", [self.deploy_prompt_edit])
-        if self.deploy_component_enable.isChecked() and (not self.deploy_component_name.text().strip()):
-            return ("已启用成分组合，请填写组合名称", [self.deploy_component_name])
+        if deploy_mode == "single" and (not self.deploy_component_name.text().strip()):
+            return ("单目标模式下请填写组合名称", [self.deploy_component_name])
         if self.deploy_enable_llm.isChecked() and (not self._is_online()):
             return ("网络错误：当前未联网，无法扩词", [])
         if self.deploy_enable_llm.isChecked() and (not self._can_reach_llm_host()):
             return ("网络错误：无法连接 LLM 接口地址", [self.llm_base])
         return (None, [])
 
+    def _on_deploy_target_mode_changed(self, _index):
+        is_single = str(self.deploy_target_mode_combo.currentData() or "single") == "single"
+        self.deploy_component_enable.setChecked(is_single)
+        self.deploy_component_name.setEnabled(is_single)
+        if is_single:
+            self.deploy_component_name.setPlaceholderText("统一类别名，例如: 目标")
+        else:
+            self.deploy_component_name.setPlaceholderText("多目标模式下不需要组合名称")
+
     def build_deploy_command(self):
         preview_path = self._resolve_input_path("dataset_annotations/_deploy_preview.jpg")
         preview_path.parent.mkdir(parents=True, exist_ok=True)
         self._deploy_preview_file = str(preview_path)
-        cmd = [
-            sys.executable,
-            "-u",
-            "main.py",
-            "camera",
+        cmd = self._build_main_entry_command("camera") + [
             "--model",
             self._to_rel_display_path(self._resolve_input_path(self.deploy_model_edit.text().strip())),
             "--camera",
@@ -2868,7 +3060,9 @@ class MainWindow(QMainWindow):
             if self.domain.text().strip():
                 cmd.extend(["--domain-hint", self.domain.text().strip()])
 
-        if self.deploy_component_enable.isChecked() and self.deploy_component_name.text().strip():
+        cmd.extend(["--target-mode", str(self.deploy_target_mode_combo.currentData() or "single")])
+
+        if self.deploy_target_mode_combo.currentData() == "single" and self.deploy_component_name.text().strip():
             cmd.append("--component-combine")
             cmd.extend(["--component-name", self.deploy_component_name.text().strip()])
         return cmd
@@ -2941,6 +3135,60 @@ class MainWindow(QMainWindow):
             return ("请填写训练图片目录", [self.train_images_edit])
         if not model:
             return ("请填写训练模型路径", [self.train_model_edit])
+
+        ann_dir = self._resolve_input_path(ann)
+        if not ann_dir.exists() or not ann_dir.is_dir():
+            return ("标注目录不存在或不是有效文件夹", [self.train_ann_edit])
+
+        img_dir = self._resolve_input_path(imgs)
+        if not img_dir.exists() or not img_dir.is_dir():
+            return ("训练图片目录不存在或不是有效文件夹", [self.train_images_edit])
+
+        model_path = self._resolve_input_path(model)
+        if not model_path.exists() or not model_path.is_file():
+            return ("训练模型不存在，请重新选择", [self.train_model_edit])
+
+        image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+        has_images = any(p.is_file() and p.suffix.lower() in image_exts for p in img_dir.rglob("*"))
+        if not has_images:
+            return ("训练图片目录内未发现可用图片", [self.train_images_edit])
+
+        def _resolve_ann_root(base_dir: Path):
+            # 兼容直接传根目录或上级目录的场景。
+            candidates = [base_dir]
+            try:
+                candidates.extend([p for p in base_dir.iterdir() if p.is_dir()])
+            except Exception:
+                pass
+            for c in candidates:
+                if (c / "classes.txt").exists() and ((c / "labels_det").exists() or (c / "labels_seg").exists()):
+                    return c
+            return base_dir
+
+        def _is_seg_model(model_file: Path):
+            name = model_file.name.lower()
+            return ("-seg" in name) or ("_seg" in name)
+
+        ann_root = _resolve_ann_root(ann_dir)
+        expect_label_dir = ann_root / ("labels_seg" if _is_seg_model(model_path) else "labels_det")
+
+        if not expect_label_dir.exists() or not expect_label_dir.is_dir():
+            kind = "分割(labels_seg)" if _is_seg_model(model_path) else "检测(labels_det)"
+            return (
+                f"目标文件夹内未找到对应类别标注目录: {kind}，请检查数据后重试",
+                [self.train_ann_edit, self.train_model_edit],
+            )
+
+        label_files = [
+            p for p in expect_label_dir.glob("*.txt")
+            if p.is_file() and p.name.lower() != "classes.txt"
+        ]
+        if not label_files:
+            kind = "分割(labels_seg)" if _is_seg_model(model_path) else "检测(labels_det)"
+            return (
+                f"目标文件夹内没有对应类别的标注文件({kind})，请检查标注是否生成",
+                [self.train_ann_edit, self.train_model_edit],
+            )
         return (None, [])
 
     def build_train_command(self):
@@ -2949,11 +3197,7 @@ class MainWindow(QMainWindow):
         model = self.train_model_edit.text().strip() or self.model_edit.text().strip()
         dataset_out = self.train_dataset_out_edit.text().strip() or "train_dataset"
 
-        cmd = [
-            sys.executable,
-            "-u",
-            "main.py",
-            "train",
+        cmd = self._build_main_entry_command("train") + [
             "--annotation-dir",
             self._to_rel_display_path(self._resolve_input_path(ann)),
             "--images",
@@ -2971,6 +3215,10 @@ class MainWindow(QMainWindow):
             str(self.imgsz.value()),
             "--val-ratio",
             str(self.train_val_ratio.value()),
+            "--max-ram-percent",
+            str(self.train_max_ram.value()),
+            "--max-vram-percent",
+            str(self.train_max_vram.value()),
             "--device",
             "cpu" if self.force_cpu.isChecked() else self.device.currentText(),
         ]
@@ -2996,6 +3244,7 @@ class MainWindow(QMainWindow):
         self.current_task = "train"
         self.tabs.setCurrentIndex(1)
         self.clear_output()
+        self._run_paused = False
         self.update_step("准备启动训练")
         self.set_status("running", "训练中")
         self.bar.setValue(0)
@@ -3015,7 +3264,35 @@ class MainWindow(QMainWindow):
         self.btn_run.setEnabled(False)
         self.btn_train.setEnabled(False)
         self.btn_stop.setEnabled(True)
+        self.btn_train_pause.setEnabled(True)
+        self.btn_train_pause.setText(self._tr("train_pause"))
+        self.btn_train_stop.setEnabled(True)
         self.worker.start()
+
+    def toggle_train_pause(self):
+        if self.current_task != "train" or not self.worker:
+            self.append_log("STEP: 训练任务未运行，无法暂停/继续")
+            return
+        if self._run_paused:
+            if self.worker.resume_now():
+                self._run_paused = False
+                self.btn_train_pause.setText(self._tr("train_pause"))
+            else:
+                self.append_log("STEP: 继续失败（缺少进程恢复能力）")
+        else:
+            if self.worker.pause_now():
+                self._run_paused = True
+                self.btn_train_pause.setText(self._tr("train_resume"))
+            else:
+                self.append_log("STEP: 暂停失败（缺少进程挂起能力）")
+
+    def stop_train_task(self):
+        if self.current_task != "train":
+            self.append_log("STEP: 当前不是训练任务")
+            return
+        if self.worker:
+            self.worker.stop()
+            self.append_log("STEP: 已请求终止训练")
 
     def start(self):
         self._clear_invalid_marks()
@@ -3089,18 +3366,24 @@ class MainWindow(QMainWindow):
     def on_run_paused(self, msg):
         self._run_pause_requested = False
         self._run_paused = True
-        self.btn_pause_preview.setText("继续识别")
+        if self.current_task == "train":
+            self.btn_train_pause.setText(self._tr("train_resume"))
+        else:
+            self.btn_pause_preview.setText("继续识别")
         self.set_status("ready", "已暂停")
         self.update_step("暂停中")
-        self.append_log("STEP: " + str(msg or "识别已暂停"))
+        self.append_log("STEP: " + str(msg or "任务已暂停"))
 
     def on_run_resumed(self, msg):
         self._run_paused = False
         self._run_pause_requested = False
-        self.btn_pause_preview.setText(self._tr("btn_pause"))
+        if self.current_task == "train":
+            self.btn_train_pause.setText(self._tr("train_pause"))
+        else:
+            self.btn_pause_preview.setText(self._tr("btn_pause"))
         self.set_status("running", "运行中")
-        self.update_step("继续识别")
-        self.append_log("STEP: " + str(msg or "继续识别"))
+        self.update_step("继续运行")
+        self.append_log("STEP: " + str(msg or "继续运行"))
 
     def on_done(self):
         self._run_pause_requested = False
@@ -3116,6 +3399,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, "btn_deploy_stop"):
             self.btn_deploy_stop.setEnabled(False)
         self.btn_stop.setEnabled(False)
+        if hasattr(self, "btn_train_pause"):
+            self.btn_train_pause.setEnabled(False)
+            self.btn_train_pause.setText(self._tr("train_pause"))
+        if hasattr(self, "btn_train_stop"):
+            self.btn_train_stop.setEnabled(False)
         self.bar.setValue(100)
         if self._deploy_preview_timer is not None:
             self._deploy_preview_timer.stop()
@@ -3154,6 +3442,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, "btn_deploy_stop"):
             self.btn_deploy_stop.setEnabled(False)
         self.btn_stop.setEnabled(False)
+        if hasattr(self, "btn_train_pause"):
+            self.btn_train_pause.setEnabled(False)
+            self.btn_train_pause.setText(self._tr("train_pause"))
+        if hasattr(self, "btn_train_stop"):
+            self.btn_train_stop.setEnabled(False)
         if self._deploy_preview_timer is not None:
             self._deploy_preview_timer.stop()
         if self.current_task == "deploy":

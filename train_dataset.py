@@ -3,11 +3,181 @@ import random
 import shutil
 from pathlib import Path
 import xml.etree.ElementTree as ET
+import gc
+import importlib
+import subprocess
+import sys
 
 from ultralytics import YOLO
 
+try:
+    import torch  # type: ignore
+except Exception:
+    torch = None
+
+try:
+    import psutil  # type: ignore
+except Exception:
+    psutil = None
+
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+
+
+def _resolve_annotation_root(annotation_dir: Path):
+    """Resolve actual annotation root that contains labels_det/classes.txt.
+
+    Supports both direct root (annotation_dir/labels_det) and parent folders that
+    contain one or more annotation subfolders.
+    """
+    ann_dir = Path(annotation_dir)
+    labels_dir = ann_dir / "labels_det"
+    classes_file = ann_dir / "classes.txt"
+
+    if labels_dir.exists() and classes_file.exists():
+        return ann_dir, labels_dir, classes_file
+
+    candidates = []
+    if ann_dir.exists() and ann_dir.is_dir():
+        for p in ann_dir.iterdir():
+            if not p.is_dir():
+                continue
+            c_labels = p / "labels_det"
+            c_classes = p / "classes.txt"
+            if c_labels.exists() and c_classes.exists():
+                candidates.append(p)
+
+    if len(candidates) == 1:
+        resolved = candidates[0]
+        return resolved, resolved / "labels_det", resolved / "classes.txt"
+
+    if len(candidates) > 1:
+        candidate_text = ", ".join(str(x) for x in candidates)
+        raise RuntimeError(
+            "annotation-dir 下存在多个可用标注目录，请指定更精确路径: " + candidate_text
+        )
+
+    raise FileNotFoundError(
+        f"未找到检测标签目录与类别文件: {ann_dir} (期望包含 labels_det 和 classes.txt)"
+    )
+
+
+def _infer_is_seg_model(model_path: str):
+    stem = Path(str(model_path or "")).stem.lower()
+    # Common naming convention: xxx-seg.pt / xxx_seg.pt
+    return ("-seg" in stem) or ("_seg" in stem) or stem.endswith("seg")
+
+
+def _resolve_labels_dir(ann_dir: Path, args):
+    mode = str(getattr(args, "label_kind", "auto") or "auto").strip().lower()
+    det_dir = ann_dir / "labels_det"
+    seg_dir = ann_dir / "labels_seg"
+
+    if mode == "det":
+        if not det_dir.exists():
+            raise FileNotFoundError(f"未找到检测标签目录: {det_dir}")
+        return det_dir, "det"
+
+    if mode == "seg":
+        if not seg_dir.exists():
+            raise FileNotFoundError(f"未找到分割标签目录: {seg_dir}")
+        return seg_dir, "seg"
+
+    # auto mode
+    prefer_seg = _infer_is_seg_model(getattr(args, "model", ""))
+    if prefer_seg and seg_dir.exists():
+        return seg_dir, "seg"
+    if det_dir.exists():
+        return det_dir, "det"
+    if seg_dir.exists():
+        return seg_dir, "seg"
+    raise FileNotFoundError(f"未找到可用标签目录: {det_dir} 或 {seg_dir}")
+
+
+def _validate_label_style(labels_dir: Path, label_kind: str):
+    """Quick sanity check to avoid cryptic ultralytics runtime crashes."""
+    for p in labels_dir.glob("*.txt"):
+        raw = p.read_text(encoding="utf-8", errors="ignore").strip()
+        if not raw:
+            continue
+        for line in raw.splitlines():
+            parts = line.strip().split()
+            if not parts:
+                continue
+            if label_kind == "seg":
+                if len(parts) <= 5:
+                    raise RuntimeError(
+                        f"检测到分割训练但标签像检测框格式(仅{len(parts)}列): {p} | 行: {line[:120]}"
+                    )
+            else:
+                if len(parts) < 5:
+                    raise RuntimeError(f"检测到无效检测标签(<5列): {p} | 行: {line[:120]}")
+            return
+
+
+def _apply_memory_safety(args):
+    """Log memory status without mutating user-provided workers/batch."""
+    if getattr(args, "no_safe_memory", False):
+        return
+
+    if psutil is None:
+        print("内存保护: 未安装 psutil，跳过自适应限流")
+        return
+
+    vm = psutil.virtual_memory()
+    total_gb = float(vm.total) / (1024.0 ** 3)
+    cpu_mode = str(args.device).lower() == "cpu"
+    cuda_ok = bool(torch is not None and torch.cuda.is_available())
+    vram_total_gb = 0.0
+    if cuda_ok:
+        try:
+            dev = torch.cuda.current_device()
+            prop = torch.cuda.get_device_properties(dev)
+            vram_total_gb = float(getattr(prop, "total_memory", 0.0) or 0.0) / (1024.0 ** 3)
+        except Exception:
+            vram_total_gb = 0.0
+
+    if cpu_mode:
+        print("内存保护: CPU模式，仅监控不自动调整workers/batch")
+    else:
+        print("内存保护: GPU模式，仅监控不自动调整workers/batch")
+
+    print(
+        f"内存保护启用: RAM={total_gb:.1f}GB 当前占用={vm.percent:.1f}% "
+        f"workers={args.workers} batch={args.batch} "
+        f"RAM阈值={args.max_ram_percent:.1f}% VRAM阈值={args.max_vram_percent:.1f}%"
+    )
+    if cuda_ok and vram_total_gb > 0:
+        print(f"显存信息: 总显存={vram_total_gb:.1f}GB")
+
+
+def _ensure_onnx_requirements_in_current_env():
+    """Ensure ONNX export deps are available in current interpreter environment."""
+    required_modules = ["onnx", "onnxruntime", "onnxslim"]
+    missing = []
+    for mod in required_modules:
+        try:
+            importlib.import_module(mod)
+        except Exception:
+            missing.append(mod)
+
+    if not missing:
+        return
+
+    pkg_map = {
+        "onnx": "onnx>=1.12.0,<2.0.0",
+        "onnxruntime": "onnxruntime",
+        "onnxslim": "onnxslim>=0.1.71",
+    }
+    install_list = [pkg_map[m] for m in missing if m in pkg_map]
+    print(f"ONNX导出依赖缺失(当前环境): {', '.join(missing)}")
+    print("尝试在当前解释器环境安装依赖...")
+    cmd = [sys.executable, "-m", "pip", "install", *install_list]
+    subprocess.check_call(cmd)
+
+    importlib.invalidate_caches()
+    for mod in missing:
+        importlib.import_module(mod)
 
 
 def collect_images(images_dir: Path):
@@ -189,15 +359,19 @@ def _build_voc_split(items, labels_dir: Path, names, img_out: Path, xml_out: Pat
 def build_dataset(args):
     ann_dir = Path(args.annotation_dir)
     images_dir = Path(args.images)
-    labels_dir = ann_dir / "labels_det"
-    classes_file = ann_dir / "classes.txt"
+
+    ann_dir, labels_dir, classes_file = _resolve_annotation_root(ann_dir)
+    labels_dir, label_kind = _resolve_labels_dir(ann_dir, args)
 
     if not ann_dir.exists():
         raise FileNotFoundError(f"未找到标注目录: {ann_dir}")
     if not images_dir.exists():
         raise FileNotFoundError(f"未找到图片目录: {images_dir}")
-    if not labels_dir.exists():
-        raise FileNotFoundError(f"未找到检测标签目录: {labels_dir}")
+
+    print(f"标注目录解析结果: {ann_dir}")
+    print(f"标签目录解析结果: {labels_dir} (kind={label_kind})")
+
+    _validate_label_style(labels_dir, label_kind)
 
     names = read_classes(classes_file)
     images = collect_images(images_dir)
@@ -233,15 +407,19 @@ def build_dataset(args):
 def build_dataset_voc_xml(args):
     ann_dir = Path(args.annotation_dir)
     images_dir = Path(args.images)
-    labels_dir = ann_dir / "labels_det"
-    classes_file = ann_dir / "classes.txt"
+
+    ann_dir, labels_dir, classes_file = _resolve_annotation_root(ann_dir)
+    labels_dir, label_kind = _resolve_labels_dir(ann_dir, args)
 
     if not ann_dir.exists():
         raise FileNotFoundError(f"未找到标注目录: {ann_dir}")
     if not images_dir.exists():
         raise FileNotFoundError(f"未找到图片目录: {images_dir}")
-    if not labels_dir.exists():
-        raise FileNotFoundError(f"未找到检测标签目录: {labels_dir}")
+
+    print(f"标注目录解析结果: {ann_dir}")
+    print(f"标签目录解析结果: {labels_dir} (kind={label_kind})")
+
+    _validate_label_style(labels_dir, label_kind)
 
     names = read_classes(classes_file)
     images = collect_images(images_dir)
@@ -286,6 +464,17 @@ def run_train(args):
     print(f"数据集拆分完成: train={n_train}, val={n_val}")
     print(f"data.yaml: {data_yaml}")
 
+    dataset_out_dir = Path(args.dataset_out).resolve()
+    # 训练输出强制落在数据输出目录下，仅保留 best 运行目录。
+    args.project = str(dataset_out_dir)
+    args.name = "best"
+
+    target_save_dir = Path(args.project) / args.name
+    if target_save_dir.exists() and target_save_dir.is_dir():
+        shutil.rmtree(target_save_dir)
+
+    _apply_memory_safety(args)
+
     model = YOLO(args.model)
 
     def on_fit_epoch_end(trainer):
@@ -314,6 +503,20 @@ def run_train(args):
             print(
                 f"TRAIN_METRIC: epoch={epoch_now}/{epoch_total} loss={loss_s} map50={map50_s} map50_95={map95_s}"
             )
+            if (not args.no_safe_memory) and psutil is not None:
+                vm = psutil.virtual_memory()
+                print(f"TRAIN_RAM: used={vm.percent:.1f}% available_gb={vm.available / (1024.0 ** 3):.2f}")
+            if (not args.no_safe_memory) and torch is not None and torch.cuda.is_available():
+                try:
+                    dev = torch.cuda.current_device()
+                    prop = torch.cuda.get_device_properties(dev)
+                    total = float(getattr(prop, "total_memory", 0.0) or 0.0)
+                    used = float(torch.cuda.memory_reserved(dev))
+                    pct = (used / total) * 100.0 if total > 0 else 0.0
+                    print(f"TRAIN_VRAM: used={pct:.1f}% reserved_gb={used / (1024.0 ** 3):.2f}")
+                except Exception:
+                    pass
+            gc.collect()
         except Exception:
             pass
 
@@ -327,6 +530,7 @@ def run_train(args):
         device=args.device,
         project=args.project,
         name=args.name,
+        exist_ok=True,
         workers=args.workers,
     )
 
@@ -337,11 +541,29 @@ def run_train(args):
     print(f"TRAIN_SAVE_DIR: {save_dir}")
     print(f"TRAIN_BEST: {best_pt}")
 
+    # 仅清理训练运行目录，保留数据集目录(images/labels/annotations等)与 best。
+    project_dir = Path(args.project)
+    keep_dir = project_dir / "best"
+    if project_dir.exists() and project_dir.is_dir() and keep_dir.exists():
+        for p in project_dir.iterdir():
+            if not p.is_dir() or p.resolve() == keep_dir.resolve():
+                continue
+            name = p.name.lower()
+            if name.startswith("exp") or (name.startswith("best") and name != "best"):
+                shutil.rmtree(p, ignore_errors=True)
+
     if args.export_onnx:
         if not best_pt.exists():
             print("未找到 best.pt，跳过ONNX导出")
             return
         print("开始导出ONNX...")
+        try:
+            _ensure_onnx_requirements_in_current_env()
+        except Exception as e:
+            raise RuntimeError(
+                "ONNX依赖安装/校验失败，请在当前解释器环境手动执行: "
+                f"{sys.executable} -m pip install onnx>=1.12.0,<2.0.0 onnxruntime onnxslim>=0.1.71 | 原因: {e}"
+            )
         export_model = YOLO(str(best_pt))
         onnx_path = export_model.export(
             format="onnx",
@@ -358,6 +580,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="基于已标注数据集进行训练并可导出ONNX")
     parser.add_argument("--annotation-dir", required=True, help="标注输出目录(含 labels_det/classes.txt)")
     parser.add_argument("--images", required=True, help="原始图片目录")
+    parser.add_argument(
+        "--label-kind",
+        default="auto",
+        choices=["auto", "det", "seg"],
+        help="标签类型: auto/det/seg。auto 会按模型名优先选择分割标签。",
+    )
     parser.add_argument("--dataset-out", default="train_dataset", help="自动拆分后的数据集输出目录")
     parser.add_argument(
         "--dataset-format",
@@ -374,6 +602,9 @@ def main(argv=None):
     parser.add_argument("--imgsz", type=int, default=1024, help="训练输入尺寸")
     parser.add_argument("--batch", type=int, default=8, help="batch size")
     parser.add_argument("--workers", type=int, default=4, help="dataloader workers")
+    parser.add_argument("--max-ram-percent", type=float, default=88.0, help="内存保护阈值(百分比)")
+    parser.add_argument("--max-vram-percent", type=float, default=92.0, help="显存保护阈值(百分比)")
+    parser.add_argument("--no-safe-memory", action="store_true", help="关闭内存保护(不建议)")
     parser.add_argument("--device", default="auto", help="训练设备: auto/cpu/0")
     parser.add_argument("--project", default="runs/train", help="训练输出project")
     parser.add_argument("--name", default="exp_auto", help="训练输出name")
@@ -385,7 +616,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.device == "auto":
-        args.device = "0"
+        use_cuda = bool(torch is not None and torch.cuda.is_available())
+        args.device = "0" if use_cuda else "cpu"
+        print(f"训练设备自动选择: {args.device} (cuda_available={use_cuda})")
 
     run_train(args)
 
